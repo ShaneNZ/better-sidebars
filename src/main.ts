@@ -1,9 +1,10 @@
-import { Plugin, WorkspaceItem } from "obsidian";
+import { EventRef, Plugin, WorkspaceItem } from "obsidian";
 import {
 	BetterSidebarsSettingTab,
 	BetterSidebarsSettings,
 	DEFAULT_SETTINGS,
 } from "./settings";
+import { DockChromeCorrector } from "./dock-chrome";
 
 type DropDirection = "left" | "right" | "top" | "bottom" | "center";
 
@@ -31,6 +32,8 @@ export default class BetterSidebarsPlugin extends Plugin {
 	settings: BetterSidebarsSettings = { ...DEFAULT_SETTINGS };
 
 	private originalGetDropDirection: GetDropDirectionFn | null = null;
+	private dockChromeCorrector: DockChromeCorrector | null = null;
+	private dockChromeEventRefs: EventRef[] = [];
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -38,11 +41,13 @@ export default class BetterSidebarsPlugin extends Plugin {
 
 		if (this.settings.enabled) {
 			this.patchWorkspace();
+			this.startDockChromeCorrection();
 		}
 	}
 
 	onunload(): void {
 		this.unpatchWorkspace();
+		this.stopDockChromeCorrection();
 	}
 
 	async loadSettings(): Promise<void> {
@@ -63,8 +68,10 @@ export default class BetterSidebarsPlugin extends Plugin {
 
 		if (enabled) {
 			this.patchWorkspace();
+			this.startDockChromeCorrection();
 		} else {
 			this.unpatchWorkspace();
+			this.stopDockChromeCorrection();
 		}
 	}
 
@@ -101,5 +108,28 @@ export default class BetterSidebarsPlugin extends Plugin {
 		const patchable = this.app.workspace as unknown as WorkspaceWithDropDirection;
 		patchable.getDropDirection = this.originalGetDropDirection;
 		this.originalGetDropDirection = null;
+	}
+
+	private startDockChromeCorrection(): void {
+		if (this.dockChromeCorrector) return; // already running
+
+		const corrector = new DockChromeCorrector(this.app);
+		this.dockChromeCorrector = corrector;
+		this.dockChromeEventRefs = [
+			this.app.workspace.on("layout-change", corrector.schedule),
+			this.app.workspace.on("resize", corrector.schedule),
+		];
+		// registerEvent() ties these to the plugin's own unload as a backstop;
+		// stopDockChromeCorrection() below additionally offrefs them itself so
+		// toggling the setting off/on repeatedly can't accumulate listeners.
+		this.dockChromeEventRefs.forEach((ref) => this.registerEvent(ref));
+		corrector.schedule(); // covers a multi-column layout already on disk at startup
+	}
+
+	private stopDockChromeCorrection(): void {
+		this.dockChromeEventRefs.forEach((ref) => this.app.workspace.offref(ref));
+		this.dockChromeEventRefs = [];
+		this.dockChromeCorrector?.cancel();
+		this.dockChromeCorrector = null;
 	}
 }

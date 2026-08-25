@@ -1,0 +1,160 @@
+import type { App, WorkspaceItem, WorkspaceRibbon } from "obsidian";
+
+type Side = "left" | "right";
+
+/**
+ * Obsidian's sidebar chrome - the collapse/expand toggle button
+ * (`.sidebar-toggle-button`) and the `mod-top` / `mod-top-{side}-space` classes
+ * that make a dock's topmost tab strip blend into the (hidden, frameless)
+ * titlebar and double as a window-drag region - was built assuming a sidedock
+ * only ever holds one tab group. Once BetterSidebars lets a dock hold more than
+ * one side-by-side column, core's own placement logic for that chrome breaks:
+ * the toggle button gets attached inside whichever tab group happens to be
+ * first in the dock's internal tree (not necessarily the one actually touching
+ * the window edge), the `mod-top*` classes stop being assigned to anything, and
+ * a collapse/expand cycle can detach the button into the main editor root
+ * entirely. None of this is `getDropDirection`'s doing - it's unrelated core
+ * layout code with a gap this plugin's own feature exposes.
+ *
+ * `correctDockChrome` re-derives, from live geometry rather than tree position
+ * (which is what core's own logic gets wrong), which tab group in each dock
+ * should hold the chrome, and repairs the DOM/classes if they've drifted. It's
+ * cheap and idempotent, so it's safe to re-run on every layout change, and a
+ * no-op for the stock single-column case.
+ */
+
+interface InternalItem extends WorkspaceItem {
+	type: string;
+	containerEl: HTMLElement;
+}
+
+interface InternalParent extends InternalItem {
+	children: InternalItem[];
+}
+
+interface WorkspaceWithRibbons {
+	leftRibbon: WorkspaceRibbon;
+	rightRibbon: WorkspaceRibbon;
+}
+
+interface RibbonWithContainer {
+	containerEl: HTMLElement;
+}
+
+function hasChildren(item: InternalItem): item is InternalParent {
+	return Array.isArray((item as InternalParent).children);
+}
+
+/** The tab group nearest the top of the window within `item`'s subtree. */
+function findTopmostTabs(item: InternalItem): InternalItem | null {
+	if (item.type === "tabs") return item;
+	if (!hasChildren(item) || item.children.length === 0) return null;
+
+	let best: InternalItem | null = null;
+	let bestTop = Infinity;
+	for (const child of item.children) {
+		const candidate = findTopmostTabs(child);
+		if (!candidate) continue;
+		const top = candidate.containerEl.getBoundingClientRect().top;
+		if (top < bestTop) {
+			bestTop = top;
+			best = candidate;
+		}
+	}
+	return best;
+}
+
+/** Every tab group in `item`'s subtree, appended into `out`. */
+function collectTabGroups(item: InternalItem, out: InternalItem[]): void {
+	if (item.type === "tabs") {
+		out.push(item);
+		return;
+	}
+	if (hasChildren(item)) {
+		for (const child of item.children) collectTabGroups(child, out);
+	}
+}
+
+/** The column (a direct child of the dock) whose edge sits closest to the window edge. */
+function findOuterColumn(columns: InternalItem[], side: Side): InternalItem {
+	const edgeOf = (item: InternalItem): number => {
+		const rect = item.containerEl.getBoundingClientRect();
+		return side === "left" ? rect.left : rect.right;
+	};
+	return columns.reduce((outer, column) => {
+		const better = side === "left" ? edgeOf(column) < edgeOf(outer) : edgeOf(column) > edgeOf(outer);
+		return better ? column : outer;
+	});
+}
+
+function correctSide(app: App, side: Side): void {
+	const dock = (
+		side === "left" ? app.workspace.leftSplit : app.workspace.rightSplit
+	) as unknown as InternalItem;
+	if (!hasChildren(dock) || dock.children.length === 0) return;
+
+	// The toggle button's real home is the dock's own ribbon container - a
+	// fixed element outside the split/tabs tree entirely, unaffected by how
+	// many columns the dock holds. Re-parent it there if core moved it away.
+	const ribbonKey = side === "left" ? "leftRibbon" : "rightRibbon";
+	const ribbon = (app.workspace as unknown as WorkspaceWithRibbons)[ribbonKey];
+	const ribbonEl = (ribbon as unknown as RibbonWithContainer).containerEl;
+	const button = ribbonEl.ownerDocument.querySelector<HTMLElement>(
+		`.sidebar-toggle-button.mod-${side}`
+	);
+	if (button && button.parentElement !== ribbonEl) {
+		ribbonEl.prepend(button);
+	}
+
+	// Every column's own topmost tab group blends into the titlebar (mod-top);
+	// only the column actually touching the window edge also needs the padding
+	// that makes room for the ribbon/toggle button there (mod-top-{side}-space).
+	const columns = dock.children;
+	const outer = columns.length > 1 ? findOuterColumn(columns, side) : columns[0];
+
+	const desiredTop = new Set<InternalItem>();
+	const desiredSpace = new Set<InternalItem>();
+	for (const column of columns) {
+		const top = findTopmostTabs(column);
+		if (!top) continue;
+		desiredTop.add(top);
+		if (column === outer) desiredSpace.add(top);
+	}
+
+	const spaceClass = side === "left" ? "mod-top-left-space" : "mod-top-right-space";
+	const allGroups: InternalItem[] = [];
+	collectTabGroups(dock, allGroups);
+	for (const group of allGroups) {
+		group.containerEl.classList.toggle("mod-top", desiredTop.has(group));
+		group.containerEl.classList.toggle(spaceClass, desiredSpace.has(group));
+	}
+}
+
+/**
+ * Coalesces bursts of workspace events (a drag can fire several in a row) into
+ * a single correction pass per animation frame.
+ */
+export class DockChromeCorrector {
+	private readonly app: App;
+	private frameId: number | null = null;
+
+	constructor(app: App) {
+		this.app = app;
+	}
+
+	schedule = (): void => {
+		if (this.frameId !== null) return;
+		this.frameId = window.requestAnimationFrame(() => {
+			this.frameId = null;
+			correctSide(this.app, "left");
+			correctSide(this.app, "right");
+		});
+	};
+
+	cancel(): void {
+		if (this.frameId !== null) {
+			window.cancelAnimationFrame(this.frameId);
+			this.frameId = null;
+		}
+	}
+}

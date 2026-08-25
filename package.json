@@ -1,6 +1,6 @@
 {
 	"name": "better-sidebars",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "Allows dragging a tab to the left/right edge of a sidebar pane to create a new side-by-side column, matching the main editor area's split behavior.",
 	"main": "main.js",
 	"type": "module",
