@@ -21,6 +21,12 @@ type Side = "left" | "right";
  * should hold the chrome, and repairs the DOM/classes if they've drifted. It's
  * cheap and idempotent, so it's safe to re-run on every layout change, and a
  * no-op for the stock single-column case.
+ *
+ * A further complication (see `ensureButton` below): enough successive column
+ * splits can leave a dock in a shape where core doesn't merely misplace the
+ * toggle button, it never creates one for that side at all. Live testing found
+ * nothing that makes core rebuild it, so in that case this module reproduces
+ * the button itself rather than just relocating one core already made.
  */
 
 interface InternalItem extends WorkspaceItem {
@@ -39,6 +45,70 @@ interface WorkspaceWithRibbons {
 
 interface RibbonWithContainer {
 	containerEl: HTMLElement;
+}
+
+interface AppWithCommands {
+	commands: { executeCommandById(id: string): boolean };
+}
+
+const SYNTHETIC_ATTR = "data-better-sidebars-synthetic";
+
+function findRealButton(doc: Document, side: Side): HTMLElement | null {
+	return doc.querySelector<HTMLElement>(`.sidebar-toggle-button.mod-${side}:not([${SYNTHETIC_ATTR}])`);
+}
+
+function findSyntheticButton(doc: Document, side: Side): HTMLElement | null {
+	return doc.querySelector<HTMLElement>(`.sidebar-toggle-button.mod-${side}[${SYNTHETIC_ATTR}]`);
+}
+
+/**
+ * Core builds each side's toggle button once and, as far as live testing could
+ * establish, never rebuilds it - not on layout-change, not even on a full
+ * `Workspace.changeLayout()` replay of the exact same layout. Every
+ * Workspace/WorkspaceRibbon method that looked like a plausible trigger
+ * (`updateFrameless`, `updateLayout`, `onLayoutChange`, `onResize`,
+ * `updateOptions`, `changeLayout`) was tried against several dock shapes
+ * (single tabs child, a direct tabs child at index 0 vs. 1, the exact
+ * two-column-each-internally-split shape that triggers this) - none of them
+ * repopulate a missing button. Whatever earlier core operation destroys it
+ * (observed after enough successive column splits that neither of a dock's
+ * direct children is a plain `tabs` node any more) just isn't undone by
+ * anything short of restarting Obsidian.
+ *
+ * So when a side has no real, core-built button left, this clones whichever
+ * side still has one, mirrors the `mod-left`/`mod-right` class (the existing
+ * stylesheet already uses that class to flip the icon, so no manual mirroring
+ * needed), and wires its click to the same command core's own button runs.
+ * The clone is tagged with `data-better-sidebars-synthetic` so later passes
+ * can tell it apart from a real one - if core ever does end up with a genuine
+ * button for that side again (e.g. the dock's shape changes back), the
+ * stand-in is removed rather than left duplicated. This is a materially more
+ * fragile patch than the rest of this plugin: it's not relocating something
+ * core built, it's reproducing core's own chrome by hand.
+ */
+function ensureButton(app: App, ribbonEl: HTMLElement, side: Side): HTMLElement | null {
+	const doc = ribbonEl.ownerDocument;
+	const real = findRealButton(doc, side);
+	const synthetic = findSyntheticButton(doc, side);
+
+	if (real) {
+		synthetic?.remove(); // core's own button exists again - drop the stand-in
+		return real;
+	}
+	if (synthetic) return synthetic;
+
+	const otherSide: Side = side === "left" ? "right" : "left";
+	const template = findRealButton(doc, otherSide);
+	if (!template) return null; // no real button anywhere to clone from
+
+	const clone = template.cloneNode(true) as HTMLElement;
+	clone.classList.remove(`mod-${otherSide}`);
+	clone.classList.add(`mod-${side}`);
+	clone.setAttribute(SYNTHETIC_ATTR, "true");
+	clone.addEventListener("click", () => {
+		(app as unknown as AppWithCommands).commands.executeCommandById(`app:toggle-${side}-sidebar`);
+	});
+	return clone;
 }
 
 function hasChildren(item: InternalItem): item is InternalParent {
@@ -99,9 +169,7 @@ function correctSide(app: App, side: Side): void {
 	const ribbonKey = side === "left" ? "leftRibbon" : "rightRibbon";
 	const ribbon = (app.workspace as unknown as WorkspaceWithRibbons)[ribbonKey];
 	const ribbonEl = (ribbon as unknown as RibbonWithContainer).containerEl;
-	const button = ribbonEl.ownerDocument.querySelector<HTMLElement>(
-		`.sidebar-toggle-button.mod-${side}`
-	);
+	const button = ensureButton(app, ribbonEl, side);
 	if (button && button.parentElement !== ribbonEl) {
 		ribbonEl.prepend(button);
 	}

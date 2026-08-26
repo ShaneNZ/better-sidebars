@@ -54,6 +54,19 @@ Same fragility caveat as above: this leans on the same handful of undocumented
 internals (`leftSplit`/`rightSplit`/`leftRibbon`/`rightRibbon` internal shape),
 confirmed against Obsidian 1.12.7/1.13.7.
 
+Enough successive column splits can leave a dock in a shape where neither of
+its direct children is a plain `tabs` node any more (e.g. two side-by-side
+columns that are each internally split top/bottom). At that point core doesn't
+just misplace the toggle button for that side - it never creates one. Testing
+found nothing (`updateFrameless`, `updateLayout`, `changeLayout`, and others)
+that makes core rebuild it once that's happened. When that occurs, this plugin
+clones whichever side still has a real button, mirrors the `mod-left`/
+`mod-right` class, and wires its click to the same command core's own button
+runs - tagged so a later pass can tell it apart from a genuine core-built one
+and remove the stand-in if core's own button ever comes back. This is a more
+fragile patch than everything else in this plugin: it's reproducing a piece of
+core's chrome by hand rather than relocating something core already built.
+
 ## Disabling
 
 Settings → Community plugins → Better Sidebars → toggle off, or run:
