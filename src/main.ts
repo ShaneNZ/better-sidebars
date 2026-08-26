@@ -1,9 +1,11 @@
-import { Plugin, WorkspaceItem } from "obsidian";
+import { EventRef, Plugin, WorkspaceItem } from "obsidian";
 import {
 	BetterSidebarsSettingTab,
 	BetterSidebarsSettings,
 	DEFAULT_SETTINGS,
 } from "./settings";
+import { isInTopRow } from "./top-row";
+import { TopRowCollapseCorrector } from "./collapsed-top-row";
 
 type DropDirection = "left" | "right" | "top" | "bottom" | "center";
 
@@ -25,12 +27,23 @@ interface WorkspaceWithDropDirection {
  * as candidate directions there, though - left/right are pre-excluded before the
  * candidate list ever reaches Workspace.getDropDirection(). That exclusion is the
  * only thing standing between core sidebar drag behavior and full parity with the
- * main area, so this plugin patches just that one method to stop excluding them.
+ * main area, so this plugin patches just that one method to stop excluding them -
+ * except in the dock's own top row (see ./top-row.ts), which always stays a
+ * single, full-width tab group; columns can only be created from the second
+ * row down.
+ *
+ * That invariant needs active upkeep, not just gatekeeping at creation time:
+ * if the top row ever holds only a single item and that item is closed, core
+ * auto-collapses it out of the tree, and if the second row had more than one
+ * column, what's left behind is exactly the shape this plugin exists to
+ * avoid - see ./collapsed-top-row.ts.
  */
 export default class BetterSidebarsPlugin extends Plugin {
 	settings: BetterSidebarsSettings = { ...DEFAULT_SETTINGS };
 
 	private originalGetDropDirection: GetDropDirectionFn | null = null;
+	private topRowCollapseCorrector: TopRowCollapseCorrector | null = null;
+	private topRowCollapseEventRefs: EventRef[] = [];
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -38,11 +51,13 @@ export default class BetterSidebarsPlugin extends Plugin {
 
 		if (this.settings.enabled) {
 			this.patchWorkspace();
+			this.startTopRowCollapseCorrection();
 		}
 	}
 
 	onunload(): void {
 		this.unpatchWorkspace();
+		this.stopTopRowCollapseCorrection();
 	}
 
 	async loadSettings(): Promise<void> {
@@ -63,8 +78,10 @@ export default class BetterSidebarsPlugin extends Plugin {
 
 		if (enabled) {
 			this.patchWorkspace();
+			this.startTopRowCollapseCorrection();
 		} else {
 			this.unpatchWorkspace();
+			this.stopTopRowCollapseCorrection();
 		}
 	}
 
@@ -83,7 +100,9 @@ export default class BetterSidebarsPlugin extends Plugin {
 			const root = target?.getRoot ? target.getRoot() : null;
 			const isSidebar = root === leftSplit || root === rightSplit;
 
-			if (isSidebar && Array.isArray(excluded)) {
+			// The dock's own top row stays a single, full-width tab group -
+			// columns can only be created from the second row down.
+			if (isSidebar && root && Array.isArray(excluded) && !isInTopRow(target, root)) {
 				excluded = excluded.filter(
 					(direction) => direction !== "left" && direction !== "right"
 				);
@@ -101,5 +120,22 @@ export default class BetterSidebarsPlugin extends Plugin {
 		const patchable = this.app.workspace as unknown as WorkspaceWithDropDirection;
 		patchable.getDropDirection = this.originalGetDropDirection;
 		this.originalGetDropDirection = null;
+	}
+
+	private startTopRowCollapseCorrection(): void {
+		if (this.topRowCollapseCorrector) return; // already running
+
+		const corrector = new TopRowCollapseCorrector(this.app);
+		this.topRowCollapseCorrector = corrector;
+		this.topRowCollapseEventRefs = [this.app.workspace.on("layout-change", corrector.schedule)];
+		this.topRowCollapseEventRefs.forEach((ref) => this.registerEvent(ref));
+		corrector.schedule(); // covers this shape already existing on disk at startup
+	}
+
+	private stopTopRowCollapseCorrection(): void {
+		this.topRowCollapseEventRefs.forEach((ref) => this.app.workspace.offref(ref));
+		this.topRowCollapseEventRefs = [];
+		this.topRowCollapseCorrector?.cancel();
+		this.topRowCollapseCorrector = null;
 	}
 }
