@@ -1,0 +1,39 @@
+/*
+ * Obsidian's own stylesheet has an unconditional `.workspace-ribbon.mod-right
+ * { display: none }` rule (no equivalent for `.mod-left`) - confirmed live via
+ * computed styles on 1.12.7/1.13.7, at every dock state including collapsed.
+ * The left ribbon is a persistent rail that stays visible even when its dock
+ * is collapsed (that's how the left sidebar's toggle button survives
+ * collapse); the right one is structurally identical but never rendered at
+ * all, collapsed or not. There is no click-driven or event-driven way to
+ * "fix" this from JavaScript - display:none removes the element from layout
+ * regardless of what's inside it, so nothing in src/dock-chrome.ts can make a
+ * hidden element visible. This is a straightforward, minimal override to
+ * bring the right side back to parity with core's own left-side behavior.
+ *
+ * src/dock-chrome.ts checks this live (getComputedStyle) rather than
+ * hardcoding "left ribbon good, right ribbon bad" - so once this rule makes
+ * the right ribbon visible, its normal ribbon-placement logic (already used
+ * for the left side) applies to the right side too, with no further JS
+ * changes needed.
+ *
+ * Making the ribbon visible isn't enough on its own, though: core's
+ * `.workspace-ribbon .sidebar-toggle-button` rule is `position: absolute;
+ * left: 0` with no side-aware counterpart (confirmed live - there is no
+ * matching `right` rule anywhere for `.mod-right`). The button is
+ * `position: absolute`, and the ribbon itself is `position: static`, so it
+ * doesn't establish its own positioning context - the button anchors to the
+ * nearest positioned ancestor, `.app-container`, which spans the whole
+ * window. `left: 0` there means the window's left edge, regardless of which
+ * ribbon the button is actually sitting inside. Never an issue for the left
+ * ribbon (window-left and ribbon-left coincide), but on the right it pins
+ * the button to the wrong side of the screen entirely. Mirror it explicitly.
+ */
+.workspace-ribbon.mod-right {
+	display: flex;
+}
+
+.workspace-ribbon.mod-right .sidebar-toggle-button {
+	left: auto;
+	right: 0;
+}

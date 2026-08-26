@@ -1,7 +1,7 @@
 {
 	"id": "better-sidebars",
 	"name": "Better Sidebars",
-	"version": "0.2.3",
+	"version": "0.2.4",
 	"minAppVersion": "1.12.7",
 	"description": "Allows dragging a tab to the left/right edge of a sidebar pane to create a new side-by-side column, matching the main editor area's split behavior.",
 	"author": "Shane Goodwin",

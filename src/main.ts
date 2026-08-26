@@ -34,6 +34,7 @@ export default class BetterSidebarsPlugin extends Plugin {
 	private originalGetDropDirection: GetDropDirectionFn | null = null;
 	private dockChromeCorrector: DockChromeCorrector | null = null;
 	private dockChromeEventRefs: EventRef[] = [];
+	private dockChromeStartupTimeoutIds: number[] = [];
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -123,12 +124,30 @@ export default class BetterSidebarsPlugin extends Plugin {
 		// stopDockChromeCorrection() below additionally offrefs them itself so
 		// toggling the setting off/on repeatedly can't accumulate listeners.
 		this.dockChromeEventRefs.forEach((ref) => this.registerEvent(ref));
-		corrector.schedule(); // covers a multi-column layout already on disk at startup
+
+		// The very first correction, run synchronously here, lands one frame
+		// after onload() - which, on a plugin reload (and, going by testing,
+		// possibly on some app startups too) can be earlier than styles.css's
+		// `.workspace-ribbon.mod-right { display: flex }` override has actually
+		// taken effect in computed style. When that happens, this first pass
+		// correctly (given what it can see at that instant) falls back to the
+		// in-flow tab-header placement instead of the ribbon - and nothing
+		// naturally re-triggers a second pass afterward, since no further
+		// layout-change/resize event fires just from styles settling. A short
+		// burst of follow-up corrections catches that: each is idempotent and
+		// cheap, so retrying a few times over the first second after enabling
+		// costs nothing once the first one already got it right.
+		corrector.schedule();
+		for (const delay of [50, 300, 1000]) {
+			this.dockChromeStartupTimeoutIds.push(window.setTimeout(() => corrector.schedule(), delay));
+		}
 	}
 
 	private stopDockChromeCorrection(): void {
 		this.dockChromeEventRefs.forEach((ref) => this.app.workspace.offref(ref));
 		this.dockChromeEventRefs = [];
+		this.dockChromeStartupTimeoutIds.forEach((id) => window.clearTimeout(id));
+		this.dockChromeStartupTimeoutIds = [];
 		this.dockChromeCorrector?.cancel();
 		this.dockChromeCorrector = null;
 	}
