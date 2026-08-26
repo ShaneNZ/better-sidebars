@@ -11,16 +11,33 @@ type Side = "left" | "right";
  * one side-by-side column, core's own placement logic for that chrome breaks:
  * the toggle button gets attached inside whichever tab group happens to be
  * first in the dock's internal tree (not necessarily the one actually touching
- * the window edge), the `mod-top*` classes stop being assigned to anything, and
- * a collapse/expand cycle can detach the button into the main editor root
- * entirely. None of this is `getDropDirection`'s doing - it's unrelated core
- * layout code with a gap this plugin's own feature exposes.
+ * the window edge), and the `mod-top*` classes stop being assigned to anything.
+ * None of this is `getDropDirection`'s doing - it's unrelated core layout code
+ * with a gap this plugin's own feature exposes.
  *
  * `correctDockChrome` re-derives, from live geometry rather than tree position
  * (which is what core's own logic gets wrong), which tab group in each dock
  * should hold the chrome, and repairs the DOM/classes if they've drifted. It's
  * cheap and idempotent, so it's safe to re-run on every layout change, and a
  * no-op for the stock single-column case.
+ *
+ * Where to put the button is genuinely asymmetric between sides, and it's not
+ * optional to get right: Obsidian's own stylesheet has an unconditional
+ * `.workspace-ribbon.mod-right { display: none }` rule (no matching rule for
+ * `.mod-left`, confirmed live via computed styles) - the right dock's ribbon
+ * container exists in the DOM but is never visible. A button moved in there
+ * is fully DOM-present and still answers `.click()` (which bypasses rendering
+ * entirely, which is how an earlier version of this fix looked correct under
+ * test but wasn't - `offsetParent`/`getBoundingClientRect()` on that earlier
+ * placement showed it was never actually on screen), but a real person can
+ * never see or click it. So `findButtonDestination` checks the ribbon's own
+ * computed `display` live and only uses it when it's genuinely visible;
+ * otherwise it falls back to the outer column's own topmost tab group's
+ * `.workspace-tab-header-container` (in-flow, ordinary flex placement,
+ * confirmed via live DOM inspection to be a direct child of a `tabs` node's
+ * `containerEl`) - which is also exactly where an unpatched core naturally
+ * puts a misplaced-but-visible button, so this doubles as the fix for the
+ * original misplacement bug on whichever side lacks a working ribbon.
  *
  * A further complication (see `ensureButton` below): enough successive column
  * splits can leave a dock in a shape where core doesn't merely misplace the
@@ -86,8 +103,7 @@ function findSyntheticButton(doc: Document, side: Side): HTMLElement | null {
  * fragile patch than the rest of this plugin: it's not relocating something
  * core built, it's reproducing core's own chrome by hand.
  */
-function ensureButton(app: App, ribbonEl: HTMLElement, side: Side): HTMLElement | null {
-	const doc = ribbonEl.ownerDocument;
+function ensureButton(doc: Document, app: App, side: Side): HTMLElement | null {
 	const real = findRealButton(doc, side);
 	const synthetic = findSyntheticButton(doc, side);
 
@@ -157,29 +173,57 @@ function findOuterColumn(columns: InternalItem[], side: Side): InternalItem {
 	});
 }
 
+interface ButtonDestination {
+	container: HTMLElement;
+	prepend: boolean;
+}
+
+/**
+ * The ribbon when it's genuinely visible (checked live - see the module
+ * docblock for why this can't be assumed per-side), otherwise the outer
+ * column's own topmost tab group's header row, in-flow.
+ */
+function findButtonDestination(app: App, side: Side, outerTop: InternalItem | null): ButtonDestination | null {
+	const ribbonKey = side === "left" ? "leftRibbon" : "rightRibbon";
+	const ribbon = (app.workspace as unknown as WorkspaceWithRibbons)[ribbonKey];
+	const ribbonEl = (ribbon as unknown as RibbonWithContainer)?.containerEl;
+	if (ribbonEl && ribbonEl.ownerDocument.defaultView?.getComputedStyle(ribbonEl).display !== "none") {
+		return { container: ribbonEl, prepend: true };
+	}
+
+	if (!outerTop) return null;
+	const headerContainer = outerTop.containerEl.querySelector<HTMLElement>(
+		":scope > .workspace-tab-header-container"
+	);
+	if (!headerContainer) return null;
+	// Leftmost-in-flow for the left dock, rightmost for the right dock.
+	return { container: headerContainer, prepend: side === "left" };
+}
+
 function correctSide(app: App, side: Side): void {
 	const dock = (
 		side === "left" ? app.workspace.leftSplit : app.workspace.rightSplit
 	) as unknown as InternalItem;
 	if (!hasChildren(dock) || dock.children.length === 0) return;
 
-	// The toggle button's real home is the dock's own ribbon container - a
-	// fixed element outside the split/tabs tree entirely, unaffected by how
-	// many columns the dock holds. Re-parent it there if core moved it away.
-	const ribbonKey = side === "left" ? "leftRibbon" : "rightRibbon";
-	const ribbon = (app.workspace as unknown as WorkspaceWithRibbons)[ribbonKey];
-	const ribbonEl = (ribbon as unknown as RibbonWithContainer).containerEl;
-	const button = ensureButton(app, ribbonEl, side);
-	if (button && button.parentElement !== ribbonEl) {
-		ribbonEl.prepend(button);
+	const columns = dock.children;
+	const outer = columns.length > 1 ? findOuterColumn(columns, side) : columns[0];
+	if (!outer) return;
+	const outerTop = findTopmostTabs(outer);
+
+	const button = ensureButton(dock.containerEl.ownerDocument, app, side);
+	const destination = findButtonDestination(app, side, outerTop);
+	if (button && destination && button.parentElement !== destination.container) {
+		if (destination.prepend) {
+			destination.container.prepend(button);
+		} else {
+			destination.container.append(button);
+		}
 	}
 
 	// Every column's own topmost tab group blends into the titlebar (mod-top);
 	// only the column actually touching the window edge also needs the padding
-	// that makes room for the ribbon/toggle button there (mod-top-{side}-space).
-	const columns = dock.children;
-	const outer = columns.length > 1 ? findOuterColumn(columns, side) : columns[0];
-
+	// that makes room for the toggle button there (mod-top-{side}-space).
 	const desiredTop = new Set<InternalItem>();
 	const desiredSpace = new Set<InternalItem>();
 	for (const column of columns) {
