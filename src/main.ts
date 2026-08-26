@@ -4,6 +4,7 @@ import {
 	BetterSidebarsSettings,
 	DEFAULT_SETTINGS,
 } from "./settings";
+import { isInTopRow } from "./top-row";
 
 type DropDirection = "left" | "right" | "top" | "bottom" | "center";
 
@@ -25,7 +26,10 @@ interface WorkspaceWithDropDirection {
  * as candidate directions there, though - left/right are pre-excluded before the
  * candidate list ever reaches Workspace.getDropDirection(). That exclusion is the
  * only thing standing between core sidebar drag behavior and full parity with the
- * main area, so this plugin patches just that one method to stop excluding them.
+ * main area, so this plugin patches just that one method to stop excluding them -
+ * except in the dock's own top row (see ./top-row.ts), which always stays a
+ * single, full-width tab group; columns can only be created from the second
+ * row down.
  */
 export default class BetterSidebarsPlugin extends Plugin {
 	settings: BetterSidebarsSettings = { ...DEFAULT_SETTINGS };
@@ -83,7 +87,9 @@ export default class BetterSidebarsPlugin extends Plugin {
 			const root = target?.getRoot ? target.getRoot() : null;
 			const isSidebar = root === leftSplit || root === rightSplit;
 
-			if (isSidebar && Array.isArray(excluded)) {
+			// The dock's own top row stays a single, full-width tab group -
+			// columns can only be created from the second row down.
+			if (isSidebar && root && Array.isArray(excluded) && !isInTopRow(target, root)) {
 				excluded = excluded.filter(
 					(direction) => direction !== "left" && direction !== "right"
 				);
