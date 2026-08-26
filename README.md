@@ -57,6 +57,42 @@ the same held with a tab group itself as the target, and with two columns
 already present within the second row (both correctly still counted as
 non-top-row).
 
+### Keeping that invariant when the top row empties out
+
+Gatekeeping *creation* isn't enough on its own: if the top row holds only a
+single item and that item's tab is closed, core auto-collapses the
+now-redundant row out of the tree - but it only removes that one node, it
+doesn't recurse any further. If the second row had more than one column,
+what's left behind is a single wrapper whose own children (the former
+second-row columns) now start at the very top of the dock - the top row is
+now made of multiple columns, which is exactly the shape this plugin exists
+to prevent (and the shape that broke the sidebar's own collapse/expand
+chrome in earlier testing, before this restriction existed).
+
+`src/collapsed-top-row.ts`'s `TopRowCollapseCorrector` watches for this on
+every `layout-change` and repairs it: the leftmost of those columns is
+promoted back out to be its own full-width top row, and whatever other
+columns were there stay together, still side by side, now forming the new
+second row.
+
+It operates on the live workspace objects directly -
+`WorkspaceSplit.prototype.insertChild`/`removeChild`, both undocumented -
+rather than `Workspace.changeLayout()`. Reconstructing a dock via
+`changeLayout()` with a hand-written layout object was tried first and
+repeatedly produced the wrong visual arrangement (columns rendering stacked
+when the layout object asked for side-by-side, or vice versa) regardless of
+which `direction` value was used, for reasons that weren't fully pinned
+down even after isolated calibration tests; live `insertChild`/`removeChild`
+calls on the already-correctly-rendered objects behaved correctly and
+consistently across every test.
+
+Verified by reproducing the exact failure via real leaf-splitting API calls
+(not hand-crafted layout JSON) on both sidebars, with both two- and
+three-column second rows, closing the top row's leaf, and confirming the
+plugin corrected it automatically - no manual intervention - back to a
+single full-width top row with the remaining columns intact and still
+side by side underneath. No console errors throughout.
+
 ## Disabling
 
 Settings → Community plugins → Better Sidebars → toggle off, or run:
